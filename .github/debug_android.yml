@@ -1,0 +1,172 @@
+name: Release Android (Fork)
+
+# Fork-friendly Android build: builds a signed-with-debug-key APK/AAB and uploads
+# it as a workflow artifact. Skips GCP auth, Play Store upload, Firebase config,
+# Sentry, and iOS entirely. No secrets required.
+#
+# Trigger manually from the Actions tab.
+
+on:
+  workflow_dispatch:
+    inputs:
+      app-version:
+        description: 'App version (e.g. 0.27.3)'
+        required: true
+        default: '0.27.3'
+      build-type:
+        description: 'Build flavor (matches productFlavors in app/build.gradle)'
+        required: true
+        type: choice
+        default: canary
+        options:
+          - stable
+          - beta
+          - internal
+          - canary
+      artifact-type:
+        description: 'Output type (APK is easier to install on a device)'
+        required: true
+        type: choice
+        default: APK
+        options:
+          - APK
+          - AAB
+
+env:
+  BUILD_TYPE: ${{ inputs.build-type }}
+
+jobs:
+  build-android-web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Version
+        uses: ./.github/actions/setup-version
+        with:
+          app-version: ${{ inputs.app-version }}
+      - name: Setup Node.js
+        uses: ./.github/actions/setup-node
+      - name: Build Mobile
+        run: yarn affine @affine/android build
+        env:
+          PUBLIC_PATH: '/'
+      - name: Upload android web artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-web
+          path: packages/frontend/apps/android/dist
+
+  android:
+    runs-on: ubuntu-latest
+    needs:
+      - build-android-web
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Version
+        uses: ./.github/actions/setup-version
+        with:
+          app-version: ${{ inputs.app-version }}
+      - name: Download mobile artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: android-web
+          path: packages/frontend/apps/android/dist
+
+      # The project applies the google-services and firebase-crashlytics plugins,
+      # which require a google-services.json to be present at build time. Since
+      # fork repos don't have the real Firebase config, write a placeholder file
+      # with the correct package_name so the plugin is satisfied. Firebase
+      # features simply won't work at runtime.
+      - name: Create placeholder google-services.json
+        run: |
+          cat > packages/frontend/apps/android/App/app/google-services.json <<'EOF'
+          {
+            "project_info": {
+              "project_number": "000000000000",
+              "project_id": "affine-fork-placeholder",
+              "storage_bucket": "affine-fork-placeholder.appspot.com"
+            },
+            "client": [
+              {
+                "client_info": {
+                  "mobilesdk_app_id": "1:000000000000:android:0000000000000000000000",
+                  "android_client_info": {
+                    "package_name": "app.affine.pro"
+                  }
+                },
+                "oauth_client": [],
+                "api_key": [
+                  { "current_key": "AIzaSyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" }
+                ],
+                "services": {
+                  "appinvite_service": { "other_platform_oauth_client": [] }
+                }
+              }
+            ],
+            "configuration_version": "1"
+          }
+          EOF
+
+      - name: Setup Node.js
+        uses: ./.github/actions/setup-node
+        timeout-minutes: 10
+        with:
+          extra-flags: workspaces focus @affine/monorepo @affine-tools/cli @affine/android
+          playwright-install: false
+          electron-install: false
+          hard-link-nm: false
+          enableScripts: false
+      - name: Setup Rust
+        uses: ./.github/actions/build-rust
+        with:
+          target: 'aarch64-linux-android'
+          package: 'affine_mobile_native'
+          no-build: 'true'
+      - name: Cap sync
+        run: yarn workspace @affine/android cap sync
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: 'gradle'
+
+      # The release buildType in app/build.gradle has no signingConfig, so the
+      # upstream workflow relies on a real release keystore injected via
+      # capacitor buildOptions. Patch it to use the built-in debug signing
+      # config so the output is installable without any keystore secret.
+      - name: Patch release buildType to use debug signing
+        run: |
+          f='packages/frontend/apps/android/App/app/build.gradle'
+          sed -i "s|proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'|proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'\n            signingConfig signingConfigs.debug|" "$f"
+          echo '--- release buildType after patch ---'
+          grep -A 6 'release {' "$f"
+
+      - name: Build
+        working-directory: packages/frontend/apps/android/App
+        run: |
+          set -euo pipefail
+          flavor_cap="$(echo "$BUILD_TYPE" | sed 's/^./\U&/')"
+          if [ "$ARTIFACT_TYPE" = "APK" ]; then
+            ./gradlew "assemble${flavor_cap}Release"
+          else
+            ./gradlew "bundle${flavor_cap}Release"
+          fi
+        env:
+          ARTIFACT_TYPE: ${{ inputs.artifact-type }}
+          VERSION_NAME: ${{ inputs.app-version }}
+
+      - name: Upload APK artifact
+        if: inputs.artifact-type == 'APK'
+        uses: actions/upload-artifact@v4
+        with:
+          name: affine-android-${{ env.BUILD_TYPE }}-apk
+          path: packages/frontend/apps/android/App/app/build/outputs/apk/${{ env.BUILD_TYPE }}Release/*.apk
+      - name: Upload AAB artifact
+        if: inputs.artifact-type == 'AAB'
+        uses: actions/upload-artifact@v4
+        with:
+          name: affine-android-${{ env.BUILD_TYPE }}-aab
+          path: packages/frontend/apps/android/App/app/build/outputs/bundle/${{ env.BUILD_TYPE }}Release/*.aab
