@@ -4,15 +4,27 @@ name: Release Android (Fork)
 # it as a workflow artifact. Skips GCP auth, Play Store upload, Firebase config,
 # Sentry, and iOS entirely. No secrets required.
 #
-# Trigger manually from the Actions tab.
+# Trigger manually from the Actions tab. You can either:
+#   - leave "git-ref" empty to build from the default branch, or
+#   - fill in a tag name (e.g. "v0.27.3" or "0.27.3") to build that release.
+#     When building from a tag, "app-version" can be left empty and will be
+#     derived from the tag name (the leading "v" is stripped automatically).
+#
+# Note: workflow_dispatch inputs do not support dynamically listing tags. To
+# discover available tags, run `git tag` locally or check the repo's Releases
+# page, then paste the desired tag name into the "git-ref" field.
 
 on:
   workflow_dispatch:
     inputs:
+      git-ref:
+        description: 'Git ref to build (tag like "v0.27.3", or branch name). Empty = default branch.'
+        required: false
+        default: ''
       app-version:
-        description: 'App version (e.g. 0.27.3)'
-        required: true
-        default: '0.27.3'
+        description: 'App version (e.g. 0.27.3). Empty = derive from git-ref tag name, fall back to root package.json.'
+        required: false
+        default: ''
       build-type:
         description: 'Build flavor (matches productFlavors in app/build.gradle)'
         required: true
@@ -39,11 +51,43 @@ jobs:
   build-android-web:
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve checkout ref
+        id: ref
+        shell: bash
+        run: |
+          ref="${{ inputs.git-ref }}"
+          if [ -z "$ref" ]; then
+            echo "ref=" >> "$GITHUB_OUTPUT"
+            echo "Using default branch."
+          else
+            # Accept both "v0.27.3" and "0.27.3"; actions/checkout handles
+            # tags and branches transparently via the ref field.
+            echo "ref=$ref" >> "$GITHUB_OUTPUT"
+            echo "Using ref: $ref"
+          fi
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+      - name: Resolve app version
+        id: ver
+        shell: bash
+        run: |
+          v="${{ inputs.app-version }}"
+          if [ -z "$v" ] && [ -n "${{ inputs.git-ref }}" ]; then
+            # Strip an optional leading "v" from the tag name
+            v="${{ inputs.git-ref }}"
+            v="${v#v}"
+          fi
+          if [ -z "$v" ]; then
+            # Fall back to the version in the root package.json
+            v="$(jq -r '.version' package.json)"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "Resolved app version: $v"
       - name: Setup Version
         uses: ./.github/actions/setup-version
         with:
-          app-version: ${{ inputs.app-version }}
+          app-version: ${{ steps.ver.outputs.version }}
       - name: Setup Node.js
         uses: ./.github/actions/setup-node
       - name: Build Mobile
@@ -61,11 +105,36 @@ jobs:
     needs:
       - build-android-web
     steps:
+      - name: Resolve checkout ref
+        id: ref
+        shell: bash
+        run: |
+          ref="${{ inputs.git-ref }}"
+          if [ -z "$ref" ]; then
+            echo "ref=" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+      - name: Resolve app version
+        id: ver
+        shell: bash
+        run: |
+          v="${{ inputs.app-version }}"
+          if [ -z "$v" ] && [ -n "${{ inputs.git-ref }}" ]; then
+            v="${{ inputs.git-ref }}"
+            v="${v#v}"
+          fi
+          if [ -z "$v" ]; then
+            v="$(jq -r '.version' package.json)"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
       - name: Setup Version
         uses: ./.github/actions/setup-version
         with:
-          app-version: ${{ inputs.app-version }}
+          app-version: ${{ steps.ver.outputs.version }}
       - name: Download mobile artifact
         uses: actions/download-artifact@v4
         with:
@@ -161,7 +230,7 @@ jobs:
           fi
         env:
           ARTIFACT_TYPE: ${{ inputs.artifact-type }}
-          VERSION_NAME: ${{ inputs.app-version }}
+          VERSION_NAME: ${{ steps.ver.outputs.version }}
 
       - name: Upload APK artifact
         if: inputs.artifact-type == 'APK'
