@@ -137,12 +137,17 @@ jobs:
       # upstream workflow relies on a real release keystore injected via
       # capacitor buildOptions. Patch it to use the built-in debug signing
       # config so the output is installable without any keystore secret.
-      - name: Patch release buildType to use debug signing
+      #
+      # Also override usesCleartextTraffic to "true" for release so that users
+      # can configure an http:// server URL in the app's UI. Upstream sets it
+      # to "false" in defaultConfig (only debug overrides it to "true"), which
+      # blocks all plain HTTP traffic in release builds.
+      - name: Patch release buildType (debug signing + allow HTTP cleartext)
         run: |
           f='packages/frontend/apps/android/App/app/build.gradle'
-          sed -i "s|proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'|proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'\n            signingConfig signingConfigs.debug|" "$f"
+          sed -i "s|proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'|proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'\n            signingConfig signingConfigs.debug\n            manifestPlaceholders = [usesCleartextTraffic: \"true\"]|" "$f"
           echo '--- release buildType after patch ---'
-          grep -A 6 'release {' "$f"
+          grep -A 8 'release {' "$f"
 
       - name: Build
         working-directory: packages/frontend/apps/android/App
